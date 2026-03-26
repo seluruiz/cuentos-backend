@@ -9,18 +9,29 @@ const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const Database = require('better-sqlite3');
 
+// NUEVAS LIBRERÍAS PARA LA VOZ
+const multer = require('multer');
+const FormData = require('form-data');
+const axios = require('axios');
+
 const app = express();
 
-app.set('trust proxy', true);
+// --- SOLUCIÓN DEL ERROR AQUÍ ---
+// Cambiamos 'true' por 1 para que rate-limit sea seguro en Render
+app.set('trust proxy', 1); 
+
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+
+// Configuración para recibir audios temporales
+const upload = multer({ dest: 'uploads/' });
 
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'Trop de requêtes, veuillez réessayer plus tard.' },
+  message: { error: 'Trop de requêtes, veuillez réessayer plus tard.' }
 });
 
 app.use('/api/', apiLimiter);
@@ -222,6 +233,54 @@ app.get('/', (req, res) => {
   res.json({ ok: true, message: 'Backend funcionando y seguro' });
 });
 
+// --- NUEVO ENDPOINT: RECIBIR Y CLONAR VOZ EN ELEVENLABS ---
+app.post('/api/voice/clone', upload.single('audio'), async (req, res) => {
+    console.log("👉 [PASO 1] Petición de clonación recibida desde la App!");
+    
+    try {
+        if (!req.file) {
+            console.log("❌ [ERROR] La petición llegó, pero no trae ningún archivo de audio adjunto.");
+            return res.status(400).json({ error: 'Aucun fichier audio reçu par le serveur' });
+        }
+
+        console.log(`👉 [PASO 2] Archivo recibido correctamente: ${req.file.originalname}. Subiendo a ElevenLabs...`);
+        const voiceName = req.body.voiceName || 'Voix Magique';
+        
+        const formData = new FormData();
+        formData.append('name', voiceName);
+        formData.append('description', 'Voix clonée depuis l\'app Cuentos Magiques');
+        formData.append('files', fs.createReadStream(req.file.path), {
+            filename: req.file.originalname,
+            contentType: req.file.mimetype,
+        });
+
+        const elevenLabsResponse = await axios.post(
+            'https://api.elevenlabs.io/v1/voices/add',
+            formData,
+            {
+                headers: {
+                    'xi-api-key': process.env.ELEVENLABS_API_KEY,
+                    ...formData.getHeaders(),
+                },
+            }
+        );
+
+        fs.unlinkSync(req.file.path); // Borramos el audio temporal
+        console.log(`✅ [PASO 3] ÉXITO. Voz clonada en ElevenLabs con ID: ${elevenLabsResponse.data.voice_id}`);
+
+        res.status(200).json({ 
+            success: true, 
+            voiceId: elevenLabsResponse.data.voice_id 
+        });
+
+    } catch (error) {
+        console.error('❌ [ERROR ELEVENLABS]:', error?.response?.data || error.message);
+        if (req.file) fs.unlinkSync(req.file.path); 
+        res.status(500).json({ error: `ElevenLabs a refusé: ${error?.response?.data?.detail?.message || error.message}` });
+    }
+});
+// ---------------------------------------------------------
+
 app.post('/api/story/generate', enforceStoryQuota, async (req, res) => {
   try {
     const { childName, childAge, theme, storyline, language = 'fr' } = req.body;
@@ -321,49 +380,60 @@ Return ONLY valid JSON:
   }
 });
 
+// --- ENDPOINT TTS ACTUALIZADO (HÍBRIDO: OPENAI / ELEVENLABS) ---
 app.post('/api/story/tts', attachAccessContext, async (req, res) => {
   try {
-    const { storyId, audioToken, text, voice = 'nova', speed = 0.88 } = req.body;
+    const { storyId, audioToken, text, voice = 'nova', speed = 0.88, customVoiceId } = req.body;
 
     let sourceText = '';
 
     if (storyId && audioToken) {
       const story = getStory(storyId);
-
-      if (
-        story &&
-        story.user_id === req.rcUserId &&
-        story.audio_token === audioToken
-      ) {
+      if (story && story.user_id === req.rcUserId && story.audio_token === audioToken) {
         sourceText = story.story_text;
       }
     }
 
-    // Fallback solo para premium: reproducir cuentos antiguos sin token
     if (!sourceText && req.isPremium && text) {
       sourceText = text;
     }
 
     if (!sourceText) {
-      return res.status(403).json({
-        error: 'Accès audio non autorisé',
-      });
+      return res.status(403).json({ error: 'Accès audio non autorisé' });
     }
 
     const chunks = chunkText(sourceText, 3500);
     const audioBuffers = [];
 
-    for (const chunk of chunks) {
-      const mp3 = await client.audio.speech.create({
-        model: 'tts-1-hd',
-        voice,
-        input: chunk,
-        speed,
-        response_format: 'mp3',
-      });
-
-      const arrayBuffer = await mp3.arrayBuffer();
-      audioBuffers.push(Buffer.from(arrayBuffer));
+    // LÓGICA HÍBRIDA: ElevenLabs si hay voz clonada, OpenAI si no la hay
+    if (customVoiceId && req.isPremium) {
+        for (const chunk of chunks) {
+            const response = await axios.post(
+                `https://api.elevenlabs.io/v1/text-to-speech/${customVoiceId}`,
+                {
+                    text: chunk,
+                    model_id: "eleven_multilingual_v2",
+                    voice_settings: { stability: 0.5, similarity_boost: 0.75 }
+                },
+                {
+                    headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY, 'Content-Type': 'application/json' },
+                    responseType: 'arraybuffer'
+                }
+            );
+            audioBuffers.push(Buffer.from(response.data, 'binary'));
+        }
+    } else {
+        for (const chunk of chunks) {
+          const mp3 = await client.audio.speech.create({
+            model: 'tts-1-hd',
+            voice,
+            input: chunk,
+            speed,
+            response_format: 'mp3',
+          });
+          const arrayBuffer = await mp3.arrayBuffer();
+          audioBuffers.push(Buffer.from(arrayBuffer));
+        }
     }
 
     const finalBuffer = Buffer.concat(audioBuffers);
@@ -374,10 +444,7 @@ app.post('/api/story/tts', attachAccessContext, async (req, res) => {
     });
   } catch (error) {
     console.error('Error generando audio:', error);
-    res.status(500).json({
-      error: 'Error generando el audio',
-      details: error.message,
-    });
+    res.status(500).json({ error: 'Error generando el audio', details: error.message });
   }
 });
 
