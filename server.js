@@ -15,10 +15,9 @@ const axios = require('axios');
 const app = express();
 app.set('trust proxy', 1);
 
-// CORS restringido a lo básico (para React Native no suele haber Origin, 
-// pero evitamos peticiones web no deseadas si existieran)
+// CORS restringido a lo básico
 app.use(cors());
-app.use(express.json({ limit: '2mb' })); // Bajamos límite de JSON
+app.use(express.json({ limit: '2mb' })); 
 
 // --- RATE LIMITS ESPECÍFICOS ---
 const apiLimiter = rateLimit({
@@ -29,7 +28,7 @@ const apiLimiter = rateLimit({
 
 const voiceCloneLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hora
-  max: 10, // Máximo 10 intentos de clonación por hora
+  max: 10,
   message: { error: 'Limite de clonage atteinte. Réessayez plus tard.' }
 });
 
@@ -48,7 +47,6 @@ const upload = multer({
     fileSize: 15 * 1024 * 1024 // Máximo 15MB
   },
   fileFilter: (req, file, cb) => {
-    // Aceptar solo formatos de audio
     if (file.mimetype.startsWith('audio/') || file.mimetype === 'video/mp4') {
       cb(null, true);
     } else {
@@ -71,14 +69,12 @@ fs.mkdirSync(dataDir, { recursive: true });
 const db = new Database(path.join(dataDir, 'app.sqlite'));
 db.pragma('journal_mode = WAL');
 
-// --- NUEVA ESTRUCTURA DE BASE DE DATOS ---
+// --- ESTRUCTURA DE BASE DE DATOS (ACTUALIZADA A LIFETIME) ---
 db.exec(`
-  CREATE TABLE IF NOT EXISTS daily_usage (
-    user_id TEXT NOT NULL,
-    day TEXT NOT NULL,
+  CREATE TABLE IF NOT EXISTS lifetime_usage (
+    user_id TEXT PRIMARY KEY,
     count INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (user_id, day)
+    updated_at TEXT NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS stories (
@@ -103,26 +99,23 @@ db.exec(`
 const premiumCache = new Map();
 const PREMIUM_CACHE_MS = 5 * 60 * 1000;
 
-function getTodayString() {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function getOrCreateDailyUsage(userId, day) {
-  const row = db.prepare(`SELECT count FROM daily_usage WHERE user_id = ? AND day = ?`).get(userId, day);
+// --- FUNCIONES DE LÍMITE DE POR VIDA (1 HISTORIA GRATIS TOTAL) ---
+function getTotalUsage(userId) {
+  const row = db.prepare(`SELECT count FROM lifetime_usage WHERE user_id = ?`).get(userId);
   if (!row) {
-    db.prepare(`INSERT INTO daily_usage (user_id, day, count, updated_at) VALUES (?, ?, 0, ?)`).run(userId, day, new Date().toISOString());
+    db.prepare(`INSERT INTO lifetime_usage (user_id, count, updated_at) VALUES (?, 0, ?)`).run(userId, new Date().toISOString());
     return 0;
   }
   return row.count;
 }
 
-function incrementDailyUsage(userId, day) {
-  const existing = db.prepare(`SELECT count FROM daily_usage WHERE user_id = ? AND day = ?`).get(userId, day);
+function incrementTotalUsage(userId) {
+  const existing = db.prepare(`SELECT count FROM lifetime_usage WHERE user_id = ?`).get(userId);
   if (!existing) {
-    db.prepare(`INSERT INTO daily_usage (user_id, day, count, updated_at) VALUES (?, ?, 1, ?)`).run(userId, day, new Date().toISOString());
-    return;
+    db.prepare(`INSERT INTO lifetime_usage (user_id, count, updated_at) VALUES (?, 1, ?)`).run(userId, new Date().toISOString());
+  } else {
+    db.prepare(`UPDATE lifetime_usage SET count = count + 1, updated_at = ? WHERE user_id = ?`).run(new Date().toISOString(), userId);
   }
-  db.prepare(`UPDATE daily_usage SET count = count + 1, updated_at = ? WHERE user_id = ? AND day = ?`).run(new Date().toISOString(), userId, day);
 }
 
 function saveStory({ storyId, userId, storyText, audioToken }) {
@@ -168,7 +161,7 @@ async function getPremiumStatus(rcUserId) {
       const rcData = await rcResponse.json();
       isPremium = hasActiveEntitlement(rcData?.subscriber, 'premium');
     }
-  } catch (error) {} // Silencioso en prod
+  } catch (error) {} 
   premiumCache.set(rcUserId, { value: isPremium, expiresAt: Date.now() + PREMIUM_CACHE_MS });
   return isPremium;
 }
@@ -184,13 +177,15 @@ async function attachAccessContext(req, res, next) {
   next();
 }
 
+// Middleware para bloquear si ya usó su historia gratis histórica
 async function enforceStoryQuota(req, res, next) {
   await attachAccessContext(req, res, async () => {
     if (req.isPremium) return next();
-    const today = getTodayString();
-    const used = getOrCreateDailyUsage(req.rcUserId, today);
-    if (used >= 1) return res.status(429).json({ error: 'Limite gratuite atteinte' });
-    req.usageDay = today;
+    
+    const used = getTotalUsage(req.rcUserId);
+    if (used >= 1) {
+      return res.status(429).json({ error: 'Limite gratuite atteinte' });
+    }
     next();
   });
 }
@@ -213,7 +208,7 @@ function chunkText(text, maxLength) {
 
 app.get('/', (req, res) => res.json({ ok: true }));
 
-// --- ENDPOINT: RECIBIR Y CLONAR VOZ (PROTEGIDO) ---
+// --- ENDPOINT: RECIBIR Y CLONAR VOZ ---
 app.post('/api/voice/clone', attachAccessContext, voiceCloneLimiter, (req, res, next) => {
   upload.single('audio')(req, res, (err) => {
     if (err) return res.status(400).json({ error: err.message });
@@ -248,7 +243,6 @@ app.post('/api/voice/clone', attachAccessContext, voiceCloneLimiter, (req, res, 
     fs.unlinkSync(req.file.path); 
     const newVoiceId = elevenLabsResponse.data.voice_id;
 
-    // Guardar propiedad en base de datos
     saveUserVoice(newVoiceId, req.rcUserId, voiceName);
 
     res.status(200).json({ success: true, voiceId: newVoiceId });
@@ -258,23 +252,20 @@ app.post('/api/voice/clone', attachAccessContext, voiceCloneLimiter, (req, res, 
   }
 });
 
-// --- ENDPOINT: ELIMINAR VOZ DE ELEVENLABS (NUEVO) ---
+// --- ENDPOINT: ELIMINAR VOZ ---
 app.delete('/api/voice/:voiceId', attachAccessContext, async (req, res) => {
   try {
     const { voiceId } = req.params;
 
-    // Verificar que la voz pertenece a ESTE usuario
     const voiceRecord = getUserVoice(voiceId, req.rcUserId);
     if (!voiceRecord) {
       return res.status(403).json({ error: 'Non autorisé à supprimer cette voix' });
     }
 
-    // Borrar de ElevenLabs
     await axios.delete(`https://api.elevenlabs.io/v1/voices/${voiceId}`, {
       headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY }
     });
 
-    // Borrar de nuestra DB
     deleteUserVoice(voiceId, req.rcUserId);
 
     res.json({ success: true });
@@ -319,7 +310,10 @@ app.post('/api/story/generate', enforceStoryQuota, async (req, res) => {
 
     saveStory({ storyId, userId: req.rcUserId, storyText: parsed.storyText || '', audioToken });
 
-    if (!req.isPremium) incrementDailyUsage(req.rcUserId, req.usageDay);
+    // AQUÍ ESTÁ LA MAGIA: Si no es premium, sumamos +1 a su contador de por vida
+    if (!req.isPremium) {
+      incrementTotalUsage(req.rcUserId);
+    }
 
     res.json({
       storyId, audioToken,
@@ -332,7 +326,6 @@ app.post('/api/story/generate', enforceStoryQuota, async (req, res) => {
   }
 });
 
-// --- ENDPOINT TTS CERRADO Y SEGURO ---
 app.post('/api/story/tts', attachAccessContext, ttsLimiter, async (req, res) => {
   try {
     const { storyId, audioToken, voice = 'nova', speed = 0.88, customVoiceId } = req.body;
@@ -345,12 +338,10 @@ app.post('/api/story/tts', attachAccessContext, ttsLimiter, async (req, res) => 
       }
     }
 
-    // BYPASS DE TEST ELIMINADO. Si no hay sourceText válido en DB, se rechaza.
     if (!sourceText) {
       return res.status(403).json({ error: 'Accès audio non autorisé ou histoire introuvable' });
     }
 
-    // SI USA VOZ PERSONALIZADA, VERIFICAR QUE LE PERTENECE
     if (customVoiceId) {
       const voiceRecord = getUserVoice(customVoiceId, req.rcUserId);
       if (!voiceRecord) {
