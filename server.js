@@ -16,8 +16,6 @@ const axios = require('axios');
 
 const app = express();
 
-// --- SOLUCIÓN DEL ERROR AQUÍ ---
-// Cambiamos 'true' por 1 para que rate-limit sea seguro en Render
 app.set('trust proxy', 1); 
 
 app.use(cors());
@@ -233,7 +231,7 @@ app.get('/', (req, res) => {
   res.json({ ok: true, message: 'Backend funcionando y seguro' });
 });
 
-// --- NUEVO ENDPOINT: RECIBIR Y CLONAR VOZ EN ELEVENLABS ---
+// --- ENDPOINT: RECIBIR Y CLONAR VOZ EN ELEVENLABS ---
 app.post('/api/voice/clone', upload.single('audio'), async (req, res) => {
     console.log("👉 [PASO 1] Petición de clonación recibida desde la App!");
     
@@ -265,7 +263,7 @@ app.post('/api/voice/clone', upload.single('audio'), async (req, res) => {
             }
         );
 
-        fs.unlinkSync(req.file.path); // Borramos el audio temporal
+        fs.unlinkSync(req.file.path); 
         console.log(`✅ [PASO 3] ÉXITO. Voz clonada en ElevenLabs con ID: ${elevenLabsResponse.data.voice_id}`);
 
         res.status(200).json({ 
@@ -394,7 +392,8 @@ app.post('/api/story/tts', attachAccessContext, async (req, res) => {
       }
     }
 
-    if (!sourceText && req.isPremium && text) {
+    // --- ARREGLO PARA PRUEBAS: Permite usar texto directo aunque no sea premium ---
+    if (!sourceText && text) {
       sourceText = text;
     }
 
@@ -405,8 +404,8 @@ app.post('/api/story/tts', attachAccessContext, async (req, res) => {
     const chunks = chunkText(sourceText, 3500);
     const audioBuffers = [];
 
-    // LÓGICA HÍBRIDA: ElevenLabs si hay voz clonada, OpenAI si no la hay
-    if (customVoiceId && req.isPremium) {
+    // --- ARREGLO PARA PRUEBAS: Quitamos la restricción req.isPremium ---
+    if (customVoiceId) { 
         for (const chunk of chunks) {
             const response = await axios.post(
                 `https://api.elevenlabs.io/v1/text-to-speech/${customVoiceId}`,
