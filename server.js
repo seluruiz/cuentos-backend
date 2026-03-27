@@ -166,12 +166,19 @@ async function getPremiumStatus(rcUserId) {
   return isPremium;
 }
 
-// Middleware de autenticación global
+// Middleware de autenticación global (ACTUALIZADO PARA FORM-DATA)
 async function attachAccessContext(req, res, next) {
-  const rcUserId = req.body.rcUserId || req.query.rcUserId || req.headers['x-rc-user-id'];
+  // Buscar primero en los headers (la forma más segura para subida de archivos)
+  let rcUserId = req.headers['x-rc-user-id'] || req.headers['x-rc-userid'];
+  
+  // Si no está en los headers, buscar en body o query (para JSON normal)
+  if (!rcUserId && req.body && req.body.rcUserId) rcUserId = req.body.rcUserId;
+  if (!rcUserId && req.query && req.query.rcUserId) rcUserId = req.query.rcUserId;
+
   if (!rcUserId || typeof rcUserId !== 'string') {
     return res.status(401).json({ error: 'Identification manquante' });
   }
+  
   req.rcUserId = rcUserId;
   req.isPremium = await getPremiumStatus(rcUserId);
   next();
