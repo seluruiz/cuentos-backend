@@ -166,7 +166,7 @@ async function getPremiumStatus(rcUserId) {
   return isPremium;
 }
 
-// Middleware de autenticación global (ACTUALIZADO PARA FORM-DATA)
+// Middleware de autenticación global
 async function attachAccessContext(req, res, next) {
   // Buscar primero en los headers (la forma más segura para subida de archivos)
   let rcUserId = req.headers['x-rc-user-id'] || req.headers['x-rc-userid'];
@@ -286,7 +286,8 @@ app.post('/api/story/generate', enforceStoryQuota, async (req, res) => {
     const { childName, childAge, theme, storyline, language = 'fr' } = req.body;
     if (!childName || !childAge || !theme) return res.status(400).json({ error: 'Faltan datos' });
 
-    const prompt = `You are a master sleep-therapist and children's storyteller. Write a BEDTIME STORY in ${language} for ${childName} (${childAge} years old). Theme: ${theme}. Storyline: ${storyline || 'Une aventure douce et magique'}. CRITICAL REQUIREMENTS: Length: Exactly between 800 and 950 words. Name Repetition: Use the name "${childName}" strategically at least 6-8 times. Age Adaptation: The child is ${childAge}. If age is 2-4, use very simple words and short sentences. If age is 5+, use more descriptive and narrative language. Tone: Hypnotic, slow, safe. Use sensory words (warm, soft, floating, heavy eyelids). STRUCTURE (MUST BE EXACTLY 5 PARTS): 1. Calm Introduction. 2. Soft Adventure. 3. Small Emotional Conflict. 4. Resolution. 5. Sleep Closure. Return ONLY valid JSON: {"title": "A magical title", "storyText": "Full story with paragraph breaks (\\n\\n)", "imagePrompt": "A highly detailed description of the main scene."}`;
+    // NUEVO PROMPT MEJORADO PARA AUDIO TTS
+    const prompt = `You are a master sleep-therapist and children's storyteller. Write a BEDTIME STORY in ${language} for ${childName} (${childAge} years old). Theme: ${theme}. Storyline: ${storyline || 'Une aventure douce et magique'}. CRITICAL REQUIREMENTS: 1. Length: Exactly between 800 and 950 words. 2. Format: This is an AUDIO SCRIPT for a TTS engine. You MUST use short sentences, abundant ellipses (...) to force slow, relaxing pauses, and exclamation/question marks for emotional expression. 3. Tone: Hypnotic, whispered, safe. Use sensory words (warm, soft, floating, heavy eyelids). 4. Name Repetition: Use the name "${childName}" strategically at least 6-8 times. 5. Age Adaptation: The child is ${childAge} years old. STRUCTURE (5 PARTS): 1. Calm Introduction. 2. Soft Adventure. 3. Small Emotional Conflict. 4. Resolution. 5. Sleep Closure. Return ONLY valid JSON: {"title": "A magical title", "storyText": "Full story with paragraph breaks (\\n\\n)", "imagePrompt": "A highly detailed description of the main scene."}`;
 
     const response = await client.chat.completions.create({
       model: 'gpt-4o-mini',
@@ -317,7 +318,6 @@ app.post('/api/story/generate', enforceStoryQuota, async (req, res) => {
 
     saveStory({ storyId, userId: req.rcUserId, storyText: parsed.storyText || '', audioToken });
 
-    // AQUÍ ESTÁ LA MAGIA: Si no es premium, sumamos +1 a su contador de por vida
     if (!req.isPremium) {
       incrementTotalUsage(req.rcUserId);
     }
