@@ -69,7 +69,7 @@ fs.mkdirSync(dataDir, { recursive: true });
 const db = new Database(path.join(dataDir, 'app.sqlite'));
 db.pragma('journal_mode = WAL');
 
-// --- ESTRUCTURA DE BASE DE DATOS (ACTUALIZADA A LIFETIME) ---
+// --- ESTRUCTURA DE BASE DE DATOS ---
 db.exec(`
   CREATE TABLE IF NOT EXISTS lifetime_usage (
     user_id TEXT PRIMARY KEY,
@@ -97,7 +97,6 @@ db.exec(`
 `);
 
 const premiumCache = new Map();
-const PREMIUM_CACHE_MS = 5 * 60 * 1000;
 
 // --- FUNCIONES DE LÍMITE DE POR VIDA (1 HISTORIA GRATIS TOTAL) ---
 function getTotalUsage(userId) {
@@ -162,16 +161,23 @@ async function getPremiumStatus(rcUserId) {
       isPremium = hasActiveEntitlement(rcData?.subscriber, 'premium');
     }
   } catch (error) {} 
-  premiumCache.set(rcUserId, { value: isPremium, expiresAt: Date.now() + PREMIUM_CACHE_MS });
+
+  // EL ARREGLO DE LA CACHÉ: 
+  // Si es Premium, lo recordamos 5 minutos.
+  // Si NO es Premium, lo recordamos solo 5 segundos para que detecte compras rápidas.
+  if (isPremium) {
+    premiumCache.set(rcUserId, { value: true, expiresAt: Date.now() + 5 * 60 * 1000 });
+  } else {
+    premiumCache.set(rcUserId, { value: false, expiresAt: Date.now() + 5 * 1000 });
+  }
+  
   return isPremium;
 }
 
 // Middleware de autenticación global
 async function attachAccessContext(req, res, next) {
-  // Buscar primero en los headers (la forma más segura para subida de archivos)
   let rcUserId = req.headers['x-rc-user-id'] || req.headers['x-rc-userid'];
   
-  // Si no está en los headers, buscar en body o query (para JSON normal)
   if (!rcUserId && req.body && req.body.rcUserId) rcUserId = req.body.rcUserId;
   if (!rcUserId && req.query && req.query.rcUserId) rcUserId = req.query.rcUserId;
 
@@ -184,7 +190,7 @@ async function attachAccessContext(req, res, next) {
   next();
 }
 
-// Middleware para bloquear si ya usó su historia gratis histórica
+// Middleware para bloquear si ya usó su historia gratis
 async function enforceStoryQuota(req, res, next) {
   await attachAccessContext(req, res, async () => {
     if (req.isPremium) return next();
@@ -286,7 +292,6 @@ app.post('/api/story/generate', enforceStoryQuota, async (req, res) => {
     const { childName, childAge, theme, storyline, language = 'fr' } = req.body;
     if (!childName || !childAge || !theme) return res.status(400).json({ error: 'Faltan datos' });
 
-    // NUEVO PROMPT MEJORADO PARA AUDIO TTS
     const prompt = `You are a master sleep-therapist and children's storyteller. Write a BEDTIME STORY in ${language} for ${childName} (${childAge} years old). Theme: ${theme}. Storyline: ${storyline || 'Une aventure douce et magique'}. CRITICAL REQUIREMENTS: 1. Length: Exactly between 800 and 950 words. 2. Format: This is an AUDIO SCRIPT for a TTS engine. You MUST use short sentences, abundant ellipses (...) to force slow, relaxing pauses, and exclamation/question marks for emotional expression. 3. Tone: Hypnotic, whispered, safe. Use sensory words (warm, soft, floating, heavy eyelids). 4. Name Repetition: Use the name "${childName}" strategically at least 6-8 times. 5. Age Adaptation: The child is ${childAge} years old. STRUCTURE (5 PARTS): 1. Calm Introduction. 2. Soft Adventure. 3. Small Emotional Conflict. 4. Resolution. 5. Sleep Closure. Return ONLY valid JSON: {"title": "A magical title", "storyText": "Full story with paragraph breaks (\\n\\n)", "imagePrompt": "A highly detailed description of the main scene."}`;
 
     const response = await client.chat.completions.create({
