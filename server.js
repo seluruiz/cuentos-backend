@@ -98,7 +98,6 @@ db.exec(`
 
 const premiumCache = new Map();
 
-// --- FUNCIONES DE LÍMITE DE POR VIDA (1 HISTORIA GRATIS TOTAL) ---
 function getTotalUsage(userId) {
   const row = db.prepare(`SELECT count FROM lifetime_usage WHERE user_id = ?`).get(userId);
   if (!row) {
@@ -125,7 +124,6 @@ function getStory(storyId) {
   return db.prepare(`SELECT story_id, user_id, story_text, audio_token FROM stories WHERE story_id = ?`).get(storyId);
 }
 
-// --- FUNCIONES PARA VOCES ---
 function saveUserVoice(voiceId, userId, name) {
   db.prepare(`INSERT INTO user_voices (voice_id, user_id, name, created_at) VALUES (?, ?, ?, ?)`).run(voiceId, userId, name, new Date().toISOString());
 }
@@ -162,9 +160,6 @@ async function getPremiumStatus(rcUserId) {
     }
   } catch (error) {} 
 
-  // EL ARREGLO DE LA CACHÉ: 
-  // Si es Premium, lo recordamos 5 minutos.
-  // Si NO es Premium, lo recordamos solo 5 segundos para que detecte compras rápidas.
   if (isPremium) {
     premiumCache.set(rcUserId, { value: true, expiresAt: Date.now() + 5 * 60 * 1000 });
   } else {
@@ -174,7 +169,6 @@ async function getPremiumStatus(rcUserId) {
   return isPremium;
 }
 
-// Middleware de autenticación global
 async function attachAccessContext(req, res, next) {
   let rcUserId = req.headers['x-rc-user-id'] || req.headers['x-rc-userid'];
   
@@ -190,7 +184,6 @@ async function attachAccessContext(req, res, next) {
   next();
 }
 
-// Middleware para bloquear si ya usó su historia gratis
 async function enforceStoryQuota(req, res, next) {
   await attachAccessContext(req, res, async () => {
     if (req.isPremium) return next();
@@ -221,7 +214,6 @@ function chunkText(text, maxLength) {
 
 app.get('/', (req, res) => res.json({ ok: true }));
 
-// --- ENDPOINT: RECIBIR Y CLONAR VOZ ---
 app.post('/api/voice/clone', attachAccessContext, voiceCloneLimiter, (req, res, next) => {
   upload.single('audio')(req, res, (err) => {
     if (err) return res.status(400).json({ error: err.message });
@@ -265,7 +257,6 @@ app.post('/api/voice/clone', attachAccessContext, voiceCloneLimiter, (req, res, 
   }
 });
 
-// --- ENDPOINT: ELIMINAR VOZ ---
 app.delete('/api/voice/:voiceId', attachAccessContext, async (req, res) => {
   try {
     const { voiceId } = req.params;
@@ -345,7 +336,11 @@ app.post('/api/story/tts', attachAccessContext, ttsLimiter, async (req, res) => 
     let sourceText = '';
     if (storyId && audioToken) {
       const story = getStory(storyId);
-      if (story && story.user_id === req.rcUserId && story.audio_token === audioToken) {
+      // ARREGLO DE SEGURIDAD: 
+      // Solo pedimos que el Token encriptado coincida. 
+      // Eliminamos la comprobación de ID de usuario para permitir que los usuarios 
+      // con compras restauradas puedan escuchar sus propios cuentos antiguos.
+      if (story && story.audio_token === audioToken) {
         sourceText = story.story_text;
       }
     }
